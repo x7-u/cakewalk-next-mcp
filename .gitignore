@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Generated musical output - regenerate with make_beat.py / make_bandit.py
+*.mid
+
+# Cakewalk projects. These are personal work and can embed local paths,
+# device names and the author's directory layout.
+*.cnp
+*.cwp
+
+# Third-party material that is not ours to redistribute
+/reference-material/
+*.tar.gz
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
