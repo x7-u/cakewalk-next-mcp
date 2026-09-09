@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 
-from . import winctl
+from . import layout, winctl
 
 # All values in logical (96 DPI) pixels, relative to the window's top-left.
 MENU_BAR_Y = 22
@@ -131,8 +131,41 @@ def click_item(hwnd, pid, menu, item, settle=0.9):
             "app." % (menu, int(menu_x), int(menu_y), MENU_OPEN_ATTEMPTS)
         )
     time.sleep(settle)
+
+    # Measure the open menu rather than stepping a fixed distance per item.
+    # Menus contain separators, so a stepped offset drifts: in the File menu it
+    # lands on "Save As Project Template" when asked for "Save Project".
+    items = MENU_ITEMS[menu]
+    index = items.index(item)
+    try:
+        # find_popup_menu returns a bare hwnd, not a window dict.
+        rows, rect = layout.popup_item_rows(opened)
+    except Exception as exc:      # noqa: BLE001 - measurement can fail many ways
+        rows, rect = [], None
+        measure_error = exc
+    else:
+        measure_error = None
+
+    if len(rows) == len(items):
+        item_y = rows[index]
+        item_x = rect[0] + min(120, rect[2] // 3)
+        how = "measured"
+    else:
+        # Refuse to guess. Clicking the wrong menu item is silent and can be
+        # destructive -- New Project discards unsaved work without asking.
+        dismiss()
+        raise MenuError(
+            "The open %s menu shows %d items but %d are mapped%s, so the row "
+            "for %r cannot be identified. Re-map MENU_ITEMS[%r] against the "
+            "app, or drive this from the UI."
+            % (menu, len(rows), len(items),
+               "" if measure_error is None else " (%s)" % measure_error,
+               item, menu))
+
     winctl.click_in(pid, item_x, item_y, "menu item %r" % item)
-    return {"menu_click": [int(menu_x), int(menu_y)], "item_click": [int(item_x), int(item_y)]}
+    return {"menu_click": [int(menu_x), int(menu_y)],
+            "item_click": [int(item_x), int(item_y)],
+            "item_index": index, "rows_seen": len(rows), "targeting": how}
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +176,7 @@ def click_item(hwnd, pid, menu, item, settle=0.9):
 BROWSER_TITLE = "Add Instrument to Track"
 BROWSER_SEARCH = (674, 48)
 BROWSER_FIRST_ROW = (467, 149)
+BROWSER_ROW_STEP = 24          # logical px between result rows
 BROWSER_ADD = (782, 511)
 
 
@@ -157,11 +191,17 @@ def instrument_browser(pid, timeout=10.0):
     return None
 
 
-def choose_instrument(dialog_hwnd, name, pid=None):
-    """Search the browser for ``name`` and add the first match.
+def choose_instrument(dialog_hwnd, name, pid=None, row=0):
+    """Search the browser for ``name`` and add the match at ``row``.
 
-    Searching first means the wanted instrument is always the top row, so only
-    one row position has to be known regardless of how big the library is.
+    Searching narrows the list, but it does NOT make the wanted instrument the
+    top row, which this used to assume. Next matches tags as well as names and
+    then sorts alphabetically, so "Grand Piano" lists Dark Grand, Grand Piano,
+    Studio Grand -- row 0 is the wrong one -- and "Piano" leads with Accordion.
+
+    ``row`` is a 0-based index into the visible results. Callers that cannot be
+    sure of the ordering should photograph the dialog before committing; see
+    next_create_instrument_track, which returns the row it clicked.
     """
     left, top, _w, _h = winctl.window_rect(dialog_hwnd)
     scale = winctl.dpi_scale(dialog_hwnd)
@@ -171,14 +211,17 @@ def choose_instrument(dialog_hwnd, name, pid=None):
     def at(point):
         return left + int(point[0] * scale), top + int(point[1] * scale)
 
+    row_point = (BROWSER_FIRST_ROW[0], BROWSER_FIRST_ROW[1] + BROWSER_ROW_STEP * row)
+
     winctl.click_in(pid, *at(BROWSER_SEARCH), what="the browser search box")
     time.sleep(0.5)
     winctl.send_text(name)
     time.sleep(1.8)                      # let the list filter
-    winctl.click_in(pid, *at(BROWSER_FIRST_ROW), what="the first search result")
+    winctl.click_in(pid, *at(row_point), what="search result row %d" % row)
     time.sleep(0.8)
     winctl.click_in(pid, *at(BROWSER_ADD), what="the Add button")
-    return {"search": at(BROWSER_SEARCH), "row": at(BROWSER_FIRST_ROW), "add": at(BROWSER_ADD)}
+    return {"search": at(BROWSER_SEARCH), "row": at(row_point), "add": at(BROWSER_ADD),
+            "row_index": row}
 
 
 # --------------------------------------------------------------------------
