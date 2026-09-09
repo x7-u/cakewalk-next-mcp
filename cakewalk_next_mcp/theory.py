@@ -250,6 +250,19 @@ PROGRESSIONS = {
                            mood="static, hypnotic, groove-first"),
     "andalusian":     dict(numerals=["i", "VII", "VI", "V"], mode="phrygian",
                            mood="spanish, tense descent"),
+    # Japanese jazz-hop. Both are modal minor with no dominant V -- the cadence
+    # is bVI-bVII-i, which is what gives the style its wistful, unresolved
+    # quality rather than a functional pull home. Taken from the shapes of
+    # DJ Okawari's "Flower Dance" (G#m-E-F#-D#m) and "Luv Letter"
+    # (Gb-Ab-Bbm-Gb), transposed here into roman numerals.
+    # The qualities are pinned rather than left diatonic. Stacked in thirds the
+    # bVII of a natural minor comes out a dominant 7th, and that b7 adds a
+    # bluesy pull the originals do not have -- both use a plain major triad
+    # there. The bVI keeps its major 7th, which is where the wistfulness sits.
+    "jazzhop_modal":  dict(numerals=["i", "VImaj7", "VIImaj", "v"], mode="minor",
+                           mood="wistful, modal, no dominant -- never quite resolves"),
+    "jazzhop_letter": dict(numerals=["VImaj", "VIImaj", "i", "VImaj7"], mode="minor",
+                           mood="rises into the tonic instead of falling to it"),
 }
 
 _ROMAN = {"i": 0, "ii": 1, "iii": 2, "iv": 3, "v": 4, "vi": 5, "vii": 6}

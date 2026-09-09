@@ -1153,7 +1153,12 @@ async def next_create_instrument_track(params: CreateInstrumentTrackInput) -> st
         found = instruments.resolve(params.instrument)
     except instruments.InstrumentError:
         pass
-    if instruments.needs_download(found):
+    # Deliberately not an error. Adding the track is exactly what makes Next
+    # fetch the samples -- refusing here left the tool unable to do the one
+    # thing that fixes the problem. The reply carries `samples_missing` so a
+    # caller can verify the download landed before relying on the sound.
+    samples_missing = instruments.needs_download(found)
+    if False:
         raise ToolError(
             "%r is in the library but its samples are not downloaded, so the "
             "track would be silent. Download it inside Next first, or pick one "
@@ -1201,11 +1206,15 @@ async def next_create_instrument_track(params: CreateInstrumentTrackInput) -> st
             return _dump({
                 "created": params.instrument,
                 "resolved": found["name"] if found else None,
+                "samples_missing": samples_missing,
                 "row_clicked": params.row,
                 "likely_rows": _predict_browser_rows(params.instrument),
                 "clicks": {k: (list(v) if isinstance(v, tuple) else v)
                            for k, v in clicks.items()},
-                "next_step": "Select this track and call next_import_file to put a "
+                "next_step": ("Samples were not on disk; adding the track asks "
+                              "Next to fetch them, so check the sound before "
+                              "relying on it. " if samples_missing else "") +
+                             "Select this track and call next_import_file to put a "
                              "part on it; the import keeps this instrument. If "
                              "'likely_rows' does not have your instrument at "
                              "'row_clicked', delete the track and retry with the "
@@ -1633,30 +1642,41 @@ def _smf_notes(notes):
 # beat comes out as kick and snare only. So each role carries several spellings
 # and, where it needs them, exclusions.
 PAD_ROLES = (
-    ("kick",   ("kick", "bass drum"), ()),
-    ("snare",  ("snare", "snr"), ()),
-    ("clap",   ("clap", "handclap"), ()),
-    ("open",   ("hh open", "open hat", "open hi", "hihat open", "hi hat open",
-                "opened"), ()),
-    ("closed", ("closed", "hh", "hihat", "hi hat", "hat"),
-               ("open", "semi", "pedal", "foot")),
-    ("shaker", ("shaker", "tambourine", "tamb", "maraca"), ()),
-    ("cymbal", ("crash", "cymbal"), ("ride",)),
-    ("ride",   ("ride",), ("bell",)),
-    ("click",  ("stick", "rim", "click", "cross"), ()),
-    ("tambourine", ("tambourine",), ()),
+    # role, name fragments, exclusions, GM fallback note
+    ("kick",   ("kick", "bass drum"), ("alt", "sub"), 36),
+    ("snare",  ("snare", "snr"), ("alt",), 38),
+    ("clap",   ("clap", "handclap"), (), 39),
+    ("open",   ("hh open", "open hat", "open hi", "openedhh", "openhh",
+                "hihat open", "hi hat open", "opened"), (), 46),
+    ("closed", ("closed", "closedhh", "hh", "hihat", "hi hat", "hat"),
+               ("open", "semi", "pedal", "foot"), 42),
+    ("shaker", ("shaker", "tambourine", "maraca"), ("crash",), None),
+    ("cymbal", ("crash", "cymbal"), ("ride",), 49),
+    ("ride",   ("ride",), ("bell",), 51),
+    ("click",  ("stick", "rim", "click", "cross"), (), 37),
 )
 
 
 def _pad_roles(pads):
-    """Map a kit's pad list onto the roles the drum writer asks for."""
+    """Map a kit's pad list onto the roles the drum writer asks for.
+
+    Names alone are not enough. The Boom Bap kit calls its main kick simply
+    "BBap" -- no keyword at all -- while naming the secondary one "BBap
+    altkick", so matching on "kick" picks the wrong drum. These kits are
+    GM-ordered, so where no name matches, the General MIDI note for that role
+    is used if the kit actually has a pad there.
+    """
+    available = {pad["midi"] for pad in pads}
     found = {}
-    for role, wanted, banned in PAD_ROLES:
+    for role, wanted, banned, fallback in PAD_ROLES:
         for pad in pads:
             sound = (pad.get("sound") or "").lower()
             if any(w in sound for w in wanted) and not any(b in sound for b in banned):
                 found[role] = pad["midi"]
                 break
+        else:
+            if fallback is not None and fallback in available:
+                found[role] = fallback
     return found
 
 
@@ -1828,6 +1848,12 @@ class ComposeInput(BaseModel):
         "speak and otherwise reads late against the kick; an upright or picked "
         "bass speaks at once and wants 0. Omit for the style's default.",
         ge=0, le=0.25)
+    parts: Optional[List[str]] = Field(
+        default=None,
+        description="Which parts to write: drums, bass, keys, arp, pad, melody. "
+        "'keys' is a block-chord bed, 'arp' a rolling broken-chord figure -- "
+        "asking for both usually just muddies the middle. Omit for the style's "
+        "own choice.")
     write_to: Optional[str] = Field(
         default=None,
         description="Directory to write one .mid per part into, plus a combined "
@@ -1889,7 +1915,8 @@ async def next_compose(params: ComposeInput) -> str:
         result = compose.compose(
             style=params.style, key=params.key, mode=params.mode,
             form=params.form, bars=params.bars, tempo=params.tempo_bpm,
-            seed=params.seed, pads=pads, bass_lead=params.bass_lead_beats)
+            seed=params.seed, pads=pads, bass_lead=params.bass_lead_beats,
+            parts=tuple(params.parts) if params.parts else None)
     except (compose.ComposeError, theory.TheoryError) as exc:
         raise ToolError(str(exc)) from exc
 

@@ -60,6 +60,20 @@ STYLES = {
         keys_register=(55, 76), bass_octave=2, melody_register=(72, 88),
         description="driving, offbeat bass, open hats on the and",
     ),
+    "jazzhop": dict(
+        tempo=95, mode="minor", progression="jazzhop_modal",
+        lift="jazzhop_letter",
+        swing=0.03, backbeat=(1.0, 3.0), lay=0.025, feel="boom bap under a piano",
+        kick=[[0.0, 0.75, 2.5], [0.0, 2.5, 3.5]],
+        keys_register=(48, 67), arp_register=(60, 86), bass_octave=2,
+        pad_register=(50, 72),          # fits a cello section (C#2-E5)
+        # The piano figure carries the harmony here, so there is no block-chord
+        # keys part -- both at once just muddies the middle.
+        parts=("drums", "bass", "arp", "pad", "melody"),
+        bass_lead=0.0, melody_register=(72, 91),
+        description="Japanese jazz-hop: an acoustic piano figure over hip-hop "
+                    "drums and upright bass, modal minor with no dominant",
+    ),
     "ambient": dict(
         tempo=70, mode="lydian", progression="neo_soul_loop", lift="pop_axis",
         swing=0.0, backbeat=(), lay=0.06, feel="pulseless",
@@ -294,8 +308,14 @@ def write_keys(plan, voicings, sections, style, rng):
     return out
 
 
-def write_pad(plan, sections, style, rng, register=(64, 84)):
-    """Long tones over the bed. Lifts only, so its entry means something."""
+def write_pad(plan, sections, style, rng, register=None):
+    """Long tones over the bed. Lifts only, so its entry means something.
+
+    The register comes from the style, because it has to fit whatever is
+    playing it. A cello section tops out at E5; writing a pad at the default
+    keyboard height would put half of it above the instrument's range.
+    """
+    register = register or style.get("pad_register", (64, 84))
     out = []
     for entry in plan:
         section = _section_of(sections, entry["bar"])
@@ -303,11 +323,71 @@ def write_pad(plan, sections, style, rng, register=(64, 84)):
             continue
         if section.density < 0.25:
             continue
+        # Scored against the bass, for the same reason the chord bed is: a pad
+        # note sitting a 7th over the root down low beats against it.
+        bass = 12 * (style.get("bass_octave", 2) + 1) + entry["root"]
         voicing = theory.voice_chord(entry["root"], entry["quality"],
-                                     register=register, rootless=True, voices=2)
+                                     register=register, rootless=True, voices=2,
+                                     bass=bass)
         level = 48 if section.is_lift else 34
         for pitch in voicing[:2]:
             out.append(note(pitch, _bar(entry["bar"]), 3.9, _jit(rng, level, 5)))
+    return out
+
+
+# Broken-chord figures. The index into the voicing, one per eighth note.
+#
+# This is the part that makes a piano sound played rather than pressed. A block
+# chord states the harmony; a figure moving through the same notes carries the
+# bar. It is the whole character of Japanese jazz-hop piano, where the right
+# hand almost never stops moving.
+ARP_PATTERNS = (
+    (0, 1, 2, 3, 2, 1, 2, 3),
+    (0, 2, 1, 3, 2, 3, 1, 2),
+    (3, 2, 1, 0, 1, 2, 3, 2),
+    (0, 1, 2, 4, 3, 2, 1, 2),
+)
+
+
+def _lift_into(pitches, register):
+    """Move a voicing up whole octaves until it sits inside `register`."""
+    lo, hi = register
+    out = []
+    for pitch in pitches:
+        while pitch < lo:
+            pitch += 12
+        while pitch > hi:
+            pitch -= 12
+        out.append(pitch)
+    return sorted(set(out))
+
+
+def write_arp(plan, voicings, sections, style, rng):
+    """A rolling broken chord in the right hand."""
+    register = style.get("arp_register", (60, 84))
+    swing = style["swing"]
+    out = []
+    for entry, voicing in zip(plan, voicings):
+        section = _section_of(sections, entry["bar"])
+        if section.density < 0.3:
+            continue
+        notes = _lift_into(voicing, register)
+        if not notes:
+            continue
+        notes = notes + [notes[0] + 12]        # an octave above to turn on
+        b = _bar(entry["bar"])
+        pattern = ARP_PATTERNS[(entry["bar"] - 1) % len(ARP_PATTERNS)]
+        # Thin out where the arrangement is quiet, so the figure opens up into
+        # the chorus instead of running flat out from bar one.
+        steps = range(8) if section.density >= 0.6 else range(0, 8, 2)
+        for i in steps:
+            pitch = notes[pattern[i] % len(notes)]
+            at = b + i * 0.5 + (swing if i % 2 else 0.0)
+            level = 66 if i in (0, 4) else 54
+            if section.is_lift:
+                level += 8
+            out.append(note(pitch, at, 0.46 if section.density >= 0.6 else 0.9,
+                            _jit(rng, level, 6)))
     return out
 
 
@@ -437,6 +517,8 @@ def compose(style="lofi", key="C", mode=None, form="verse_chorus", bars=None,
     if bass_lead is not None:
         spec["bass_lead"] = float(bass_lead)
 
+    parts = parts or spec.get("parts", ("drums", "bass", "keys", "pad", "melody"))
+
     rng = random.Random(seed)
     sections = build_form(form, bars)
     total_bars = sections[-1].end_bar
@@ -451,6 +533,8 @@ def compose(style="lofi", key="C", mode=None, form="verse_chorus", bars=None,
         written["bass"] = write_bass(plan, sections, spec, rng)
     if "keys" in parts:
         written["keys"] = write_keys(plan, voicings, sections, spec, rng)
+    if "arp" in parts:
+        written["arp"] = write_arp(plan, voicings, sections, spec, rng)
     if "pad" in parts:
         written["pad"] = write_pad(plan, sections, spec, rng)
     if "melody" in parts:

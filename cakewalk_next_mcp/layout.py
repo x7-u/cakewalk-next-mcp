@@ -39,6 +39,8 @@ CONTROL_OFFSETS = {
 NAME_ROW_OFFSET = 34     # from the top of a strip down to its name row
 MIN_STRIP = 40           # physical px; anything shorter is not a strip
 SEPARATOR_DROP = 10      # luminance fall that marks a rule between strips
+GUTTER_LUMA = 30         # the dark channel between the header column and the
+                         # timeline is darker than any strip background
 
 
 class LayoutError(RuntimeError):
@@ -62,25 +64,41 @@ def panel_edge(hwnd, probe_height=900):
     gw, gh, px = screen.grab(left, top, span, min(probe_height, height))
     stride = gw * 4
 
-    candidates = []
-    for y in range(120, gh, 17):
-        base = _luma(px, stride, 20, y)
-        for x in range(200, gw - 1):
-            if abs(_luma(px, stride, x, y) - base) > 26:
-                candidates.append(x)
+    # The header column ends at a dark gutter that runs the full height before
+    # the timeline begins. Find where that gutter starts.
+    #
+    # Two simpler methods both failed. Taking the first luminance change in a
+    # row finds whatever control is leftmost in that strip -- with automation
+    # lanes open the header is full of them, and the edge landed ~40px early,
+    # throwing every control offset derived from it. Voting for the column that
+    # changes in the most rows finds the *timeline* edge instead, ~50px beyond
+    # the gutter, which is a different boundary from the one the buttons are
+    # positioned against.
+    #
+    # The gutter is unambiguous: darker than any strip background, and it holds
+    # that darkness for a long run rather than for the width of a control.
+    run = 24
+    starts = []
+    for y in range(120, gh, 9):
+        for x in range(180, gw - run):
+            if all(_luma(px, stride, x + k, y) < GUTTER_LUMA for k in range(run)):
+                starts.append(x)
                 break
-    if not candidates:
+    if not starts:
         raise LayoutError(
-            "Could not find the edge of the track header column. The window may "
-            "be obscured; bring Cakewalk Next to the front and retry.")
-    candidates.sort()
-    return left + candidates[len(candidates) // 2]
+            "Could not find the gutter after the track header column. The "
+            "window may be obscured; bring Cakewalk Next to the front and "
+            "retry.")
+    starts.sort()
+    return left + starts[len(starts) // 2]
 
 
 ICON_X = (40, 110)       # the instrument icon column, physical px from the left
 ICON_TO_STRIP_TOP = 41   # from the top of the icon back up to the strip's top
 MIN_CHROMA = 40          # how colourful a pixel must be to count as an icon
 MIN_ICON_WIDTH = 40      # coloured columns an instrument icon spans
+TOOLBAR_LOGICAL_HEIGHT = 112   # chrome above the track list, at 96 DPI
+ICON_ROW_GAP = 4         # weak rows a single icon may span before it ends
 # An open automation lane puts a small coloured toggle in the same column, so
 # colour alone finds lanes as well as tracks and doubles the count. The
 # instrument icon is much wider -- 57 columns against the toggle's 30 -- so
@@ -114,24 +132,35 @@ def strip_rows(hwnd, edge=None):
                 count += 1
         return count
 
-    runs, current = [], None
+    # A run may bridge a few weak rows. An icon is not uniformly saturated --
+    # the white keys of the little keyboard graphic wash out its middle, and on
+    # the paler icons one row dips under the threshold and splits the run into
+    # fragments too short to count, losing that track entirely.
+    runs, current, gap = [], None, 0
     for y in range(gh):
         if icon_width(y) >= MIN_ICON_WIDTH:
             current = [y, y] if current is None else [current[0], y]
-        else:
-            if current and current[1] - current[0] >= 10:
-                runs.append(current)
-            current = None
+            gap = 0
+        elif current is not None:
+            gap += 1
+            if gap > ICON_ROW_GAP:
+                if current[1] - current[0] >= 10:
+                    runs.append(current)
+                current, gap = None, 0
     if current and current[1] - current[0] >= 10:
         runs.append(current)
     if not runs:
         return []
 
     # The application logo sits in the same column, above the track list, and
-    # is just as colourful. Drop anything above the first horizontal rule of
-    # the panel itself.
-    panel_top = _panel_top(px, stride, gw, gh)
-    tops = [r[0] for r in runs if r[0] > panel_top]
+    # is just as colourful, so it has to be excluded. Deriving that cut-off
+    # from a luminance rule proved unreliable -- it drifted down as the panel
+    # changed and started eating the first real track. The toolbar above the
+    # track list is fixed-height chrome that does not vary with the window, so
+    # a scaled constant is both simpler and steadier.
+    scale = winctl.dpi_scale(hwnd)
+    logo_zone = int(TOOLBAR_LOGICAL_HEIGHT * scale)
+    tops = [r[0] for r in runs if r[0] > logo_zone]
 
     # Stop only at a jump far larger than the usual spacing, which means the
     # track list has ended. Requiring a *uniform* pitch was wrong: opening an
