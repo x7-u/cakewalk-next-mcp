@@ -66,6 +66,8 @@ STYLES = {
         swing=0.03, backbeat=(1.0, 3.0), lay=0.025, feel="boom bap under a piano",
         kick=[[0.0, 0.75, 2.5], [0.0, 2.5, 3.5]],
         keys_register=(48, 67), arp_register=(60, 86), bass_octave=2,
+        arp_left_register=(40, 57),     # the piano's left hand, under the figure
+        arp_deep_octave=True,           # plus a true low octave in the choruses
         pad_register=(50, 72),          # fits a cello section (C#2-E5)
         # The piano figure carries the harmony here, so there is no block-chord
         # keys part -- both at once just muddies the middle.
@@ -363,8 +365,20 @@ def _lift_into(pitches, register):
 
 
 def write_arp(plan, voicings, sections, style, rng):
-    """A rolling broken chord in the right hand."""
+    """A rolling broken chord in the right hand, over a left hand beneath it.
+
+    The figure alone is thin: one note at a time in a single octave, which
+    sounds like a music box rather than a piano. What gives a piano its weight
+    is that both hands are playing -- a low root under the figure, an octave
+    doubling where it needs to push, and a top voice reinforced at the accents.
+
+    Everything below MUD_LINE is roots, fifths and octaves only. Thirds and
+    sevenths down there stop reading as harmony and turn to mud, which is the
+    same rule the voicer follows.
+    """
     register = style.get("arp_register", (60, 84))
+    left_register = style.get("arp_left_register", (40, 57))
+    deep = style.get("arp_deep_octave", True)
     swing = style["swing"]
     out = []
     for entry, voicing in zip(plan, voicings):
@@ -376,18 +390,44 @@ def write_arp(plan, voicings, sections, style, rng):
             continue
         notes = notes + [notes[0] + 12]        # an octave above to turn on
         b = _bar(entry["bar"])
+        full = section.density >= 0.6
         pattern = ARP_PATTERNS[(entry["bar"] - 1) % len(ARP_PATTERNS)]
-        # Thin out where the arrangement is quiet, so the figure opens up into
-        # the chorus instead of running flat out from bar one.
-        steps = range(8) if section.density >= 0.6 else range(0, 8, 2)
+
+        # ---- right hand: the figure, unchanged in pitch ----------------
+        steps = range(8) if full else range(0, 8, 2)
         for i in steps:
             pitch = notes[pattern[i] % len(notes)]
             at = b + i * 0.5 + (swing if i % 2 else 0.0)
-            level = 66 if i in (0, 4) else 54
+            accent = i in (0, 4)
+            level = 84 if accent else 70
             if section.is_lift:
-                level += 8
-            out.append(note(pitch, at, 0.46 if section.density >= 0.6 else 0.9,
+                level += 10
+            elif not full:
+                level -= 8
+            out.append(note(pitch, at, 0.46 if full else 0.9,
                             _jit(rng, level, 6)))
+            # Double the accents an octave up in the loudest sections. It adds
+            # brightness and reach without introducing a new note.
+            if accent and section.is_lift and full:
+                out.append(note(pitch + 12, at, 0.4, _jit(rng, level - 22, 5)))
+
+        # ---- left hand: root and fifth, low, holding the bar together --
+        root_pc = entry["root"] % 12
+        lo, hi = left_register
+        root = lo + ((root_pc - lo) % 12)
+        if root > hi:
+            root -= 12
+        fifth = root + 7
+
+        out.append(note(root, b, 1.9 if full else 3.6,
+                        _jit(rng, 88 if section.is_lift else 78, 5)))
+        if full:
+            out.append(note(fifth, b + 0.02, 1.9, _jit(rng, 70, 5)))
+            out.append(note(root, b + 2.5 + swing, 1.2, _jit(rng, 74, 5)))
+        # A true low octave, for depth rather than volume. Lifts only, or it
+        # stops being an arrival.
+        if deep and section.is_lift and root - 12 >= 24:
+            out.append(note(root - 12, b, 2.4, _jit(rng, 74, 5)))
     return out
 
 
@@ -498,8 +538,7 @@ def _jit(rng, base, spread=6):
 # --------------------------------------------------------------------------
 def compose(style="lofi", key="C", mode=None, form="verse_chorus", bars=None,
             tempo=None, progression=None, lift_progression=None, seed=1129,
-            pads=None, parts=("drums", "bass", "keys", "pad", "melody"),
-            bass_lead=None):
+            pads=None, parts=None, bass_lead=None):
     """Compose a complete arrangement and check it before handing it back."""
     if style not in STYLES:
         raise ComposeError("Unknown style %r. Known: %s"
