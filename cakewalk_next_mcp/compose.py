@@ -126,12 +126,33 @@ def note(pitch, start, duration, velocity):
             "velocity": max(1, min(127, int(velocity)))}
 
 
-class Section:
-    __slots__ = ("name", "start_bar", "bars", "density", "is_lift", "index")
+# Density at which each part first plays. A part is not a switch that is on or
+# off for a whole section: it has a point at which it belongs. Ordering these
+# is what makes an arrangement assemble rather than arrive complete -- with a
+# single flat density per section, every part cleared its gate in bar one and
+# the intro was as busy as the chorus.
+ENTRY_DENSITY = {
+    "arp": 0.15,        # the figure starts alone
+    "keys": 0.25,
+    "arp_left": 0.25,   # the piano's left hand joins it mid-intro
+    "drums": 0.35,
+    "bass": 0.45,
+    "pad": 0.50,
+}
+INTRO_FROM = 0.15       # where an intro begins before ramping to its density.
+                        # Must not sit below the first part's entry, or bar one
+                        # comes out silent and the piece starts on a gap.
 
-    def __init__(self, name, start_bar, bars, density, is_lift, index):
+
+class Section:
+    __slots__ = ("name", "start_bar", "bars", "density", "is_lift", "index",
+                 "ramp_from")
+
+    def __init__(self, name, start_bar, bars, density, is_lift, index,
+                 ramp_from=None):
         self.name, self.start_bar, self.bars = name, start_bar, bars
         self.density, self.is_lift, self.index = density, is_lift, index
+        self.ramp_from = ramp_from
 
     @property
     def end_bar(self):
@@ -139,6 +160,18 @@ class Section:
 
     def contains(self, bar_no):
         return self.start_bar <= bar_no <= self.end_bar
+
+    def density_at(self, bar_no):
+        """Density for one bar, ramping across a section that builds.
+
+        An intro rises from almost nothing to its full weight over its length,
+        so parts cross their entry thresholds one at a time instead of all
+        starting together in bar one.
+        """
+        if self.ramp_from is None or self.bars < 2:
+            return self.density
+        t = (bar_no - self.start_bar) / float(self.bars - 1)
+        return self.ramp_from + (self.density - self.ramp_from) * max(0.0, min(1.0, t))
 
 
 def build_form(form="verse_chorus", bars=None):
@@ -163,7 +196,9 @@ def build_form(form="verse_chorus", bars=None):
 
     sections, bar_no = [], 1
     for i, (name, length, density, lift) in enumerate(spec):
-        sections.append(Section(name, bar_no, length, density, lift, i))
+        # An intro builds; everything else holds its level.
+        ramp = INTRO_FROM if name == "intro" and length >= 2 else None
+        sections.append(Section(name, bar_no, length, density, lift, i, ramp))
         bar_no += length
     return sections
 
@@ -215,12 +250,13 @@ def write_drums(sections, pads, style, rng):
     out = []
 
     for section in sections:
-        if section.density < 0.3:
-            continue
         for i in range(section.bars):
             n = section.start_bar + i
+            density = section.density_at(n)
+            if density < ENTRY_DENSITY["drums"]:
+                continue
             b = _bar(n)
-            full = section.density >= 0.7
+            full = density >= 0.6
             loud = section.is_lift
 
             if hat:
@@ -273,15 +309,16 @@ def write_bass(plan, sections, style, rng):
     out = []
     for entry in plan:
         section = _section_of(sections, entry["bar"])
-        if section.density < 0.35:
+        density = section.density_at(entry["bar"])
+        if density < ENTRY_DENSITY["bass"]:
             continue
         b = _bar(entry["bar"])
         root = 12 * (octave + 1) + entry["root"]
         loud = section.is_lift
         out.append(note(root, b - lead, 1.6, _jit(rng, 84 if loud else 78, 4)))
-        if section.density >= 0.6:
+        if density >= 0.6:
             out.append(note(root, b + 2.5 - lead, 0.9, _jit(rng, 72, 4)))
-        if section.density >= 0.75 and entry["bar"] % 2 == 1:
+        if density >= 0.75 and entry["bar"] % 2 == 1:
             out.append(note(root, b + 1.75 - lead, 0.4, _jit(rng, 62, 4)))
     return out
 
@@ -292,11 +329,12 @@ def write_keys(plan, voicings, sections, style, rng):
     out = []
     for entry, voicing in zip(plan, voicings):
         section = _section_of(sections, entry["bar"])
-        if section.density < 0.25:
+        density = section.density_at(entry["bar"])
+        if density < ENTRY_DENSITY["keys"]:
             continue
         b = _bar(entry["bar"])
-        loud = 66 if section.is_lift else (52 if section.density < 0.5 else 58)
-        if section.density < 0.5:
+        loud = 66 if section.is_lift else (52 if density < 0.5 else 58)
+        if density < 0.5:
             hits = [(0.0, 3.4, loud - 6)]
         else:
             hits = [(0.0, 1.5, loud), (1.5 + swing, 0.7, loud - 16),
@@ -321,9 +359,14 @@ def write_pad(plan, sections, style, rng, register=None):
     out = []
     for entry in plan:
         section = _section_of(sections, entry["bar"])
-        if not section.is_lift and section.density > 0.4:
-            continue
-        if section.density < 0.25:
+        # Lifts, a tail over the outro, and anywhere the arrangement is at
+        # full weight -- the `loop` form has no chorus at all, so keying this
+        # purely off lifts would leave it with almost no pad. It used to play
+        # in any *sparse* non-lift section, which put a pad under bar one of
+        # the intro and made the opening far heavier than it should be.
+        density = section.density_at(entry["bar"])
+        if not (section.is_lift or section.name == "outro"
+                or density >= 0.8):
             continue
         # Scored against the bass, for the same reason the chord bed is: a pad
         # note sitting a 7th over the root down low beats against it.
@@ -383,14 +426,15 @@ def write_arp(plan, voicings, sections, style, rng):
     out = []
     for entry, voicing in zip(plan, voicings):
         section = _section_of(sections, entry["bar"])
-        if section.density < 0.3:
+        density = section.density_at(entry["bar"])
+        if density < ENTRY_DENSITY["arp"]:
             continue
         notes = _lift_into(voicing, register)
         if not notes:
             continue
         notes = notes + [notes[0] + 12]        # an octave above to turn on
         b = _bar(entry["bar"])
-        full = section.density >= 0.6
+        full = density >= 0.6
         pattern = ARP_PATTERNS[(entry["bar"] - 1) % len(ARP_PATTERNS)]
 
         # ---- right hand: the figure, unchanged in pitch ----------------
@@ -419,11 +463,14 @@ def write_arp(plan, voicings, sections, style, rng):
             root -= 12
         fifth = root + 7
 
-        out.append(note(root, b, 1.9 if full else 3.6,
-                        _jit(rng, 88 if section.is_lift else 78, 5)))
-        if full:
-            out.append(note(fifth, b + 0.02, 1.9, _jit(rng, 70, 5)))
-            out.append(note(root, b + 2.5 + swing, 1.2, _jit(rng, 74, 5)))
+        # The left hand joins after the figure has been alone for a while, so
+        # the opening is one hand playing rather than a full piano at once.
+        if density >= ENTRY_DENSITY["arp_left"]:
+            out.append(note(root, b, 1.9 if full else 3.6,
+                            _jit(rng, 88 if section.is_lift else 78, 5)))
+            if full:
+                out.append(note(fifth, b + 0.02, 1.9, _jit(rng, 70, 5)))
+                out.append(note(root, b + 2.5 + swing, 1.2, _jit(rng, 74, 5)))
         # A true low octave, for depth rather than volume. Lifts only, or it
         # stops being an arrival.
         if deep and section.is_lift and root - 12 >= 24:
