@@ -246,3 +246,25 @@ def details(name_or_slug, root=None):
             "notes outside it may not sound."
         )
     return result
+
+
+# --------------------------------------------------------------------------
+# Whether a bank has anything to download.
+#
+# Only MIDISampleSynth banks are made of samples. VASynth and FMSynth banks
+# generate their sound, carry no samples, and so report installed=False for
+# ever -- the flag counts sample files on disk and there are none. Treating
+# that as "not downloaded, would be silent" wrongly locks out 152 of the 444
+# banks, including every 808 synth bass and most of the pads.
+# --------------------------------------------------------------------------
+SAMPLE_BASED_SYNTH = "MIDISampleSynth"
+
+
+def is_sample_based(entry):
+    """True when this bank's sound comes from samples that must be fetched."""
+    return bool(entry) and entry.get("synth") == SAMPLE_BASED_SYNTH
+
+
+def needs_download(entry):
+    """True only when a bank is sample-based AND its samples are missing."""
+    return is_sample_based(entry) and not entry.get("installed")

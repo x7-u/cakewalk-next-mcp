@@ -1153,7 +1153,7 @@ async def next_create_instrument_track(params: CreateInstrumentTrackInput) -> st
         found = instruments.resolve(params.instrument)
     except instruments.InstrumentError:
         pass
-    if found and not found.get("installed"):
+    if instruments.needs_download(found):
         raise ToolError(
             "%r is in the library but its samples are not downloaded, so the "
             "track would be silent. Download it inside Next first, or pick one "
@@ -1626,6 +1626,40 @@ def _smf_notes(notes):
             for n in notes]
 
 
+# Kits name their pads however they like. The 606 calls its closed hat "Hi Hat
+# Closed"; the Lofi Hop kit calls it "HH", its rim "Stick" and its crash
+# "Crash". Matching on one keyword per role silently loses whole instruments --
+# searching for "closed" against the Lofi Hop kit finds no hat at all, and the
+# beat comes out as kick and snare only. So each role carries several spellings
+# and, where it needs them, exclusions.
+PAD_ROLES = (
+    ("kick",   ("kick", "bass drum"), ()),
+    ("snare",  ("snare", "snr"), ()),
+    ("clap",   ("clap", "handclap"), ()),
+    ("open",   ("hh open", "open hat", "open hi", "hihat open", "hi hat open",
+                "opened"), ()),
+    ("closed", ("closed", "hh", "hihat", "hi hat", "hat"),
+               ("open", "semi", "pedal", "foot")),
+    ("shaker", ("shaker", "tambourine", "tamb", "maraca"), ()),
+    ("cymbal", ("crash", "cymbal"), ("ride",)),
+    ("ride",   ("ride",), ("bell",)),
+    ("click",  ("stick", "rim", "click", "cross"), ()),
+    ("tambourine", ("tambourine",), ()),
+)
+
+
+def _pad_roles(pads):
+    """Map a kit's pad list onto the roles the drum writer asks for."""
+    found = {}
+    for role, wanted, banned in PAD_ROLES:
+        for pad in pads:
+            sound = (pad.get("sound") or "").lower()
+            if any(w in sound for w in wanted) and not any(b in sound for b in banned):
+                found[role] = pad["midi"]
+                break
+    return found
+
+
 class MusicReferenceInput(BaseModel):
     """Input model for looking up what a key contains."""
 
@@ -1787,6 +1821,13 @@ class ComposeInput(BaseModel):
     seed: int = Field(
         default=1129,
         description="Same seed, same arrangement. Change it for another take.")
+    bass_lead_beats: Optional[float] = Field(
+        default=None,
+        description="How far ahead of the grid the bass sits, in beats. A sub "
+        "needs about 0.03 because its fundamental takes several cycles to "
+        "speak and otherwise reads late against the kick; an upright or picked "
+        "bass speaks at once and wants 0. Omit for the style's default.",
+        ge=0, le=0.25)
     write_to: Optional[str] = Field(
         default=None,
         description="Directory to write one .mid per part into, plus a combined "
@@ -1830,18 +1871,14 @@ async def next_compose(params: ComposeInput) -> str:
     except instruments.InstrumentError as exc:
         raise ToolError(str(exc)) from exc
     if info:
-        if not info.get("installed"):
+        if instruments.needs_download(info):
             raise ToolError(
-                "Kit %r is in the library but not downloaded, so the drums "
-                "would be silent. Download it in Next, or pass an installed "
-                "kit -- see next_list_instruments(category='kit', "
-                "installed_only=true)." % info.get("name", params.kit))
-        for keyword in ("kick", "snare", "clap", "shaker", "closed", "open",
-                        "cymbal", "tambourine", "click"):
-            for pad in info.get("pads", []):
-                if keyword in (pad.get("sound") or "").lower():
-                    pads[keyword] = pad["midi"]
-                    break
+                "Kit %r is sample-based and its samples are not downloaded, so "
+                "the drums would be silent. Adding a track with it in Next "
+                "fetches them, or pass a kit that is already there -- see "
+                "next_list_instruments(category='kit', installed_only=true)."
+                % info.get("name", params.kit))
+        pads = _pad_roles(info.get("pads", []))
         if not pads:
             raise ToolError(
                 "%r exposes no pad map, so no kit part could be written. Pass a "
@@ -1852,7 +1889,7 @@ async def next_compose(params: ComposeInput) -> str:
         result = compose.compose(
             style=params.style, key=params.key, mode=params.mode,
             form=params.form, bars=params.bars, tempo=params.tempo_bpm,
-            seed=params.seed, pads=pads)
+            seed=params.seed, pads=pads, bass_lead=params.bass_lead_beats)
     except (compose.ComposeError, theory.TheoryError) as exc:
         raise ToolError(str(exc)) from exc
 
@@ -2186,6 +2223,11 @@ class SaveProjectInput(BaseModel):
         "been saved. Omit for a project that already has a file -- it is then "
         "saved in place. A never-saved project with no name here is left "
         "untouched rather than saved somewhere arbitrary.")
+    save_as: bool = Field(
+        default=False,
+        description="Save under a new name, leaving the existing file alone. "
+        "Requires `name`. Without it, a project that already has a file is "
+        "saved in place, overwriting it.")
 
 
 @mcp.tool(
@@ -2211,9 +2253,12 @@ async def next_save_project(params: SaveProjectInput) -> str:
     window = _window_or_fail()
     before = window["title"]
 
+    if params.save_as and not params.name:
+        raise ToolError("save_as needs a name to save under.")
+
+    item = "save_project_as" if params.save_as else "save_project"
     try:
-        clicks = menus.click_item(window["hwnd"], window["pid"],
-                                  "file", "save_project")
+        clicks = menus.click_item(window["hwnd"], window["pid"], "file", item)
     except (menus.MenuError, winctl.WindowError) as exc:
         menus.dismiss()
         raise ToolError(str(exc)) from exc
@@ -2243,6 +2288,12 @@ async def next_save_project(params: SaveProjectInput) -> str:
             if not winctl.focus(dialog["hwnd"]):
                 raise ToolError("Could not focus the save dialog.")
             time.sleep(0.4)
+            # Clear the field first. Save As pre-fills it with the current file
+            # name, and typing without clearing appends: saving "lofi_beat"
+            # over a project called lofi_demo produced a file actually named
+            # "lofi_demo.cnplofi_beat".
+            winctl.send_chord("CTRL+A", expect_hwnd=dialog["hwnd"])
+            time.sleep(0.2)
             winctl.send_text(params.name)
             time.sleep(0.4)
             winctl.send_chord("ENTER", expect_hwnd=dialog["hwnd"])

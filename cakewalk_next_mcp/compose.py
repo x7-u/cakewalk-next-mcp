@@ -238,7 +238,7 @@ def write_drums(sections, pads, style, rng):
     return out
 
 
-BASS_LEAD = 0.03
+BASS_LEAD = 0.03        # ~21 ms at 84 BPM
 
 
 def write_bass(plan, sections, style, rng):
@@ -249,6 +249,11 @@ def write_bass(plan, sections, style, rng):
     bass is what everything else is judged against.
     """
     octave = style["bass_octave"]
+    # How far ahead of the grid the bass sits. A sub needs it: the fundamental
+    # takes several cycles to speak, so an exactly-placed note reads late
+    # against a kick. An upright or a picked bass speaks immediately and wants
+    # none -- give it the lead and it just sounds early.
+    lead = style.get("bass_lead", BASS_LEAD)
     out = []
     for entry in plan:
         section = _section_of(sections, entry["bar"])
@@ -257,11 +262,11 @@ def write_bass(plan, sections, style, rng):
         b = _bar(entry["bar"])
         root = 12 * (octave + 1) + entry["root"]
         loud = section.is_lift
-        out.append(note(root, b - BASS_LEAD, 1.6, _jit(rng, 84 if loud else 78, 4)))
+        out.append(note(root, b - lead, 1.6, _jit(rng, 84 if loud else 78, 4)))
         if section.density >= 0.6:
-            out.append(note(root, b + 2.5 - BASS_LEAD, 0.9, _jit(rng, 72, 4)))
+            out.append(note(root, b + 2.5 - lead, 0.9, _jit(rng, 72, 4)))
         if section.density >= 0.75 and entry["bar"] % 2 == 1:
-            out.append(note(root, b + 1.75 - BASS_LEAD, 0.4, _jit(rng, 62, 4)))
+            out.append(note(root, b + 1.75 - lead, 0.4, _jit(rng, 62, 4)))
     return out
 
 
@@ -413,7 +418,8 @@ def _jit(rng, base, spread=6):
 # --------------------------------------------------------------------------
 def compose(style="lofi", key="C", mode=None, form="verse_chorus", bars=None,
             tempo=None, progression=None, lift_progression=None, seed=1129,
-            pads=None, parts=("drums", "bass", "keys", "pad", "melody")):
+            pads=None, parts=("drums", "bass", "keys", "pad", "melody"),
+            bass_lead=None):
     """Compose a complete arrangement and check it before handing it back."""
     if style not in STYLES:
         raise ComposeError("Unknown style %r. Known: %s"
@@ -427,6 +433,9 @@ def compose(style="lofi", key="C", mode=None, form="verse_chorus", bars=None,
         if name not in theory.PROGRESSIONS:
             raise ComposeError("Unknown progression %r. Known: %s"
                                % (name, ", ".join(sorted(theory.PROGRESSIONS))))
+
+    if bass_lead is not None:
+        spec["bass_lead"] = float(bass_lead)
 
     rng = random.Random(seed)
     sections = build_form(form, bars)
@@ -457,6 +466,7 @@ def compose(style="lofi", key="C", mode=None, form="verse_chorus", bars=None,
 
     return {
         "style": style, "key": key, "mode": mode, "tempo_bpm": tempo,
+        "bass_lead": spec.get("bass_lead", BASS_LEAD),
         "form": form, "bars": total_bars,
         "seconds": round(total_bars * BEATS_PER_BAR * 60.0 / tempo, 2),
         "sections": [dict(name=s.name, start_bar=s.start_bar, bars=s.bars,

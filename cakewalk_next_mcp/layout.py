@@ -282,7 +282,12 @@ def control_states(hwnd, strips=None, edge=None):
 # Next's File menu the separators push "Save Project" down by two rows, and a
 # stepped click lands on "Save As Project Template" instead.
 # --------------------------------------------------------------------------
-MENU_TEXT_LUMA = 120     # menu labels are light on a dark popup
+MENU_TEXT_LUMA = 85      # menu labels are light on a dark popup
+# Low enough to catch DISABLED items too. Greyed-out labels are dimmer than
+# live ones, and a threshold tuned to live text drops them from the count --
+# which shifts every row below them and makes the item list look wrong. In the
+# Insert menu with no tracks in the project, one item greys out and the count
+# fell from 10 to 9.
 MENU_MIN_ROW = 3         # a text band this tall or more is a real item
 
 
